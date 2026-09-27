@@ -1,28 +1,18 @@
 {
-  "log": {
-    "level": "info"
+  "server": {
+    "port": 3000,
+    "listen": "127.0.0.1"
   },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "127.0.0.1",
-      "listen_port": 8080,
-      "users": [
-        {
-          "uuid": "bd21a7cb-de38-4dcf-9465-76ff69e8415a"
-        }
-      ],
-      "transport": {
-        "type": "ws",
-        "path": "/vless-ws"
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ]
+  "vless": {
+    "uuid": "bd21a7cb-de38-4dcf-9465-76ff69e8415a",
+    "path": "/vless-ws"
+  },
+  "security": {
+    "enableDirect": false,
+    "showFullLink": false
+  },
+  "versions": {
+    "singBox": "1.9.3",
+    "cloudflared": "2024.10.1"
+  }
 }
