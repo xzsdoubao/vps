@@ -54,8 +54,10 @@ function validateConfig(singBoxPath, configPath) {
   }
 }
 
-function start(singBoxPath, configPath, pm) {
-  logger.info(`Starting Sing-box on ${require('./config').loadConfig().server.listen}:${require('./config').loadConfig().server.port}...`);
+function start(singBoxPath, configPath, pm, cfg) {
+  const listen = cfg ? cfg.server.listen : '127.0.0.1';
+  const port = cfg ? cfg.server.port : '';
+  logger.info(`Starting Sing-box on ${listen}:${port}...`);
 
   const child = spawn(singBoxPath, ['run', '-c', configPath], {
     stdio: ['ignore', 'pipe', 'pipe']

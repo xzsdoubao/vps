@@ -16,28 +16,36 @@ function backoffDelay(attempt) {
   return Math.min(d, MAX_DELAY_MS);
 }
 
-function startTunnel(cloudflaredPath, port, pm) {
+/**
+ * Start Cloudflare Quick Tunnel with auto-restart.
+ *
+ * Resolves with the first tunnel host once established.
+ * If cloudflared crashes later, it auto-restarts with exponential backoff.
+ * When a new tunnel URL appears after a restart, onTunnelChange(newHost) is called.
+ *
+ * If max restarts exceeded, rejects. Caller should shut down sing-box and exit.
+ */
+function startTunnel(cloudflaredPath, port, pm, onTunnelChange) {
   return new Promise((resolve, reject) => {
-    let tunnelUrl = null;
-    let restarts = 0;
+    let resolved = false;
+    let currentHost = null;
+    let restartCount = 0;
+    let restartTimer = null;
 
-    const run = () => {
-      if (restarts >= MAX_RESTARTS) {
-        logger.error(`cloudflared exceeded max restarts (${MAX_RESTARTS}), giving up`);
-        return reject(new Error('cloudflared max restarts exceeded'));
+    const clearTimer = () => {
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
       }
-
-      if (restarts > 0) {
-        const wait = backoffDelay(restarts - 1);
-        logger.warn(`Restarting cloudflared in ${wait / 1000}s (attempt ${restarts + 1}/${MAX_RESTARTS})...`);
-        setTimeout(() => doRun(), wait);
-        return;
-      }
-      doRun();
     };
 
     const doRun = () => {
-      logger.info('Starting Cloudflare Quick Tunnel...');
+      if (pm.shuttingDown) {
+        logger.info('Shutting down, not restarting cloudflared.');
+        return;
+      }
+
+      logger.info(`Starting Cloudflare Quick Tunnel (attempt ${restartCount + 1})...`);
 
       const child = spawn(cloudflaredPath, [
         'tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${port}`
@@ -50,12 +58,19 @@ function startTunnel(cloudflaredPath, port, pm) {
       const onData = (data) => {
         const text = data.toString();
         const match = text.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
-        if (match && !tunnelUrl) {
-          tunnelUrl = match[0].replace('https://', '');
-          logger.info(`Cloudflare Tunnel established: ${tunnelUrl}`);
-          resolve(tunnelUrl);
+        if (match) {
+          const host = match[0].replace('https://', '');
+          if (host !== currentHost) {
+            currentHost = host;
+            logger.info(`Cloudflare Tunnel: ${host}`);
+            if (!resolved) {
+              resolved = true;
+              resolve(host);
+            } else if (typeof onTunnelChange === 'function') {
+              onTunnelChange(host);
+            }
+          }
         }
-        // Log important lines
         const lines = text.split('\n');
         for (const line of lines) {
           const t = line.trim();
@@ -68,17 +83,38 @@ function startTunnel(cloudflaredPath, port, pm) {
       child.stdout.on('data', onData);
       child.stderr.on('data', onData);
 
-      child.on('exit', (code) => {
-        logger.warn(`cloudflared exited with code ${code}`);
-        restarts++;
-        if (!tunnelUrl) {
-          run();
+      child.on('error', (e) => {
+        logger.error(`cloudflared spawn error: ${e.message}`);
+      });
+
+      child.on('exit', (code, signal) => {
+        if (pm.shuttingDown) return;
+
+        logger.warn(`cloudflared exited code=${code} signal=${signal}`);
+
+        if (restartCount >= MAX_RESTARTS) {
+          logger.error(`cloudflared exceeded max restarts (${MAX_RESTARTS}), giving up.`);
+          if (!resolved) {
+            reject(new Error('cloudflared max restarts exceeded before tunnel established'));
+          } else {
+            // Tunnel was established but now cloudflared is dead.
+            // Caller must decide: stop everything.
+            reject(new Error('cloudflared died after tunnel established and could not recover'));
+          }
+          return;
         }
-        // If tunnel was established and later exits, let pm handle shutdown
+
+        restartCount++;
+        const wait = backoffDelay(restartCount - 1);
+        logger.warn(`Restarting cloudflared in ${wait / 1000}s (attempt ${restartCount + 1}/${MAX_RESTARTS})...`);
+        restartTimer = setTimeout(() => {
+          restartTimer = null;
+          doRun();
+        }, wait);
       });
     };
 
-    run();
+    doRun();
   });
 }
 

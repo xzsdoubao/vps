@@ -76,6 +76,22 @@ check('write access to config/', () => {
   fs.unlinkSync(t);
 });
 
+check('write access to runtime/', () => {
+  const d = path.join(ROOT, 'runtime');
+  fs.mkdirSync(d, { recursive: true });
+  const t = path.join(d, '.write-test');
+  fs.writeFileSync(t, 'x');
+  fs.unlinkSync(t);
+});
+
+check('write access to tmp/', () => {
+  const d = path.join(ROOT, 'tmp');
+  fs.mkdirSync(d, { recursive: true });
+  const t = path.join(d, '.write-test');
+  fs.writeFileSync(t, 'x');
+  fs.unlinkSync(t);
+});
+
 check('config.json exists and parses', () => {
   const p = path.join(ROOT, 'config.json');
   if (!fs.existsSync(p)) throw new Error('config.json not found');

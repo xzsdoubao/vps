@@ -9,13 +9,40 @@ const { verifySha256, findChecksum } = require('./checksum');
 const BIN_DIR = path.join(__dirname, '..', 'bin');
 const TMP_DIR = path.join(__dirname, '..', 'tmp');
 
-const SINGBOX_REPO = 'https://github.com/SagerNet/sing-box';
-const CLOUDFLARED_REPO = 'https://github.com/cloudflare/cloudflared';
+// Unified binary manifest: version -> platform -> { url, sha256 }
+// All URLs point to official GitHub Releases only.
+// No "latest". No auto-guessed URLs.
+const BINARY_MANIFEST = {
+  singBox: {
+    '1.9.3': {
+      'linux-amd64': {
+        url: 'https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz',
+        sha256: '76be005265322f1e9600529cca8c247a09eb1f5454c926c4280bc392dafd2fb9'
+      }
+    }
+  },
+  cloudflared: {
+    '2024.10.1': {
+      'linux-amd64': {
+        url: 'https://github.com/cloudflare/cloudflared/releases/download/2024.10.1/cloudflared-linux-amd64',
+        sha256: null // will be fetched from official SHA256SUMS; if unavailable, abort
+      }
+    }
+  }
+};
 
-// Hardcoded SHA256 for known-good sing-box v1.9.3 linux-amd64 tarball.
-// Source: official GitHub release (no checksums.txt published upstream).
-// Verified 2026-09-27 by downloading and hashing.
-const SINGBOX_EXPECTED_SHA256 = '76be005265322f1e9600529cca8c247a09eb1f5454c926c4280bc392dafd2fb9';
+function getManifestEntry(product, version) {
+  const entry = BINARY_MANIFEST[product];
+  if (!entry || !entry[version]) {
+    throw new Error(`Unsupported binary version: ${product}@${version}. Check BINARY_MANIFEST.`);
+  }
+  const platform = 'linux-amd64';
+  const plat = entry[version][platform];
+  if (!plat) {
+    throw new Error(`Unsupported platform ${platform} for ${product}@${version}.`);
+  }
+  return plat;
+}
 
 function ensureDirs() {
   fs.mkdirSync(BIN_DIR, { recursive: true });
@@ -60,25 +87,28 @@ function ensureSingBox(version) {
     }
   }
 
-  const filename = `sing-box-${version}-linux-amd64.tar.gz`;
-  const tarballUrl = `${SINGBOX_REPO}/releases/download/v${version}/${filename}`;
+  const manifest = getManifestEntry('singBox', version);
+  const filename = path.basename(manifest.url);
 
   logger.info(`Downloading sing-box v${version} from official GitHub...`);
 
-  // 1. Download tarball to temp
   const tmpFile = path.join(TMP_DIR, filename);
-  downloadUrl(tarballUrl, tmpFile);
+  downloadUrl(manifest.url, tmpFile);
 
-  // 2. Verify SHA256 against hardcoded known-good hash
-  if (!verifySha256(tmpFile, SINGBOX_EXPECTED_SHA256)) {
-    fs.unlinkSync(tmpFile);
+  // SHA256 verification is mandatory; no fallback.
+  if (!manifest.sha256) {
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    logger.error(`No trusted SHA256 in manifest for sing-box@${version}, aborting.`);
+    process.exit(1);
+  }
+  if (!verifySha256(tmpFile, manifest.sha256)) {
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
     logger.error('SHA256 verification failed for sing-box, aborting.');
-    logger.error(`Expected: ${SINGBOX_EXPECTED_SHA256}`);
     process.exit(1);
   }
   logger.info('Sing-box SHA256 verified OK');
 
-  // 3. Extract
+  // Extract
   const extractDir = path.join(TMP_DIR, `sb-${Date.now()}`);
   fs.mkdirSync(extractDir, { recursive: true });
   execFileSync('tar', ['-xzf', tmpFile, '-C', extractDir]);
@@ -95,6 +125,7 @@ function ensureSingBox(version) {
 
 /**
  * Download and verify cloudflared binary.
+ * SHA256 is fetched from official SHA256SUMS. If unavailable, abort (no fallback).
  */
 function ensureCloudflared(version) {
   ensureDirs();
@@ -115,37 +146,41 @@ function ensureCloudflared(version) {
     }
   }
 
-  const filename = 'cloudflared-linux-amd64';
-  const binUrl = `${CLOUDFLARED_REPO}/releases/download/${version}/${filename}`;
-  const sumsUrl = `${CLOUDFLARED_REPO}/releases/download/${version}/SHA256SUMS`;
+  const manifest = getManifestEntry('cloudflared', version);
+  const filename = path.basename(manifest.url);
+  const sumsUrl = `https://github.com/cloudflare/cloudflared/releases/download/${version}/SHA256SUMS`;
 
   logger.info(`Downloading cloudflared ${version} from official GitHub...`);
 
-  // Try to fetch SHA256SUMS for verification
-  let expectedHash = null;
-  try {
-    const sumsText = fetchText(sumsUrl);
-    expectedHash = findChecksum(sumsText, filename);
-    if (expectedHash) {
-      logger.info('Found expected SHA256 in official SHA256SUMS');
-    }
-  } catch (_) {
-    logger.warn('Could not fetch SHA256SUMS for cloudflared, skipping remote checksum verification');
-  }
-
-  const tmpFile = path.join(TMP_DIR, filename);
-  downloadUrl(binUrl, tmpFile);
-
-  if (expectedHash) {
-    if (!verifySha256(tmpFile, expectedHash)) {
-      fs.unlinkSync(tmpFile);
-      logger.error('SHA256 verification failed for cloudflared, aborting.');
+  // If manifest has a hardcoded sha256, use it.
+  // Otherwise fetch from official SHA256SUMS. No fallback.
+  let expectedHash = manifest.sha256;
+  if (!expectedHash) {
+    try {
+      const sumsText = fetchText(sumsUrl);
+      expectedHash = findChecksum(sumsText, filename);
+    } catch (e) {
+      logger.error(`Could not fetch SHA256SUMS for cloudflared: ${e.message}`);
+      logger.error('Refusing to run cloudflared without verified checksum.');
       process.exit(1);
     }
-    logger.info('cloudflared SHA256 verified OK');
-  } else {
-    logger.warn('cloudflared downloaded without remote checksum verification (SHA256SUMS unavailable)');
   }
+  if (!expectedHash) {
+    logger.error(`SHA256 not found in SHA256SUMS for cloudflared-${version}-linux-amd64`);
+    logger.error('Refusing to run cloudflared without verified checksum.');
+    process.exit(1);
+  }
+  logger.info('Found expected SHA256 for cloudflared (official source)');
+
+  const tmpFile = path.join(TMP_DIR, filename);
+  downloadUrl(manifest.url, tmpFile);
+
+  if (!verifySha256(tmpFile, expectedHash)) {
+    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    logger.error('SHA256 verification failed for cloudflared, aborting.');
+    process.exit(1);
+  }
+  logger.info('cloudflared SHA256 verified OK');
 
   fs.copyFileSync(tmpFile, binPath);
   fs.chmodSync(binPath, 0o755);
@@ -155,4 +190,4 @@ function ensureCloudflared(version) {
   return binPath;
 }
 
-module.exports = { ensureSingBox, ensureCloudflared, BIN_DIR };
+module.exports = { ensureSingBox, ensureCloudflared, BIN_DIR, BINARY_MANIFEST };
