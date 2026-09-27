@@ -1,12 +1,16 @@
 {
-  "name": "vless-node-bot",
-  "version": "1.0.0",
-  "description": "Sing-box VLESS Runner",
+  "name": "secure-vless-node",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Secure Sing-box VLESS + WebSocket + Cloudflare Tunnel node",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
+  "engines": {
+    "node": ">=18"
   },
-  "keywords": [],
-  "author": "",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check src/config.js && node --check src/logger.js && node --check src/checksum.js && node --check src/downloader.js && node --check src/processManager.js && node --check src/singbox.js && node --check src/cloudflared.js && node --check src/network.js && node --check src/security.js && node --check src/doctor.js",
+    "doctor": "node src/doctor.js"
+  },
   "license": "ISC"
 }
