@@ -9,6 +9,14 @@ const { ProcessManager } = require('./src/processManager');
 const sb = require('./src/singbox');
 const cf = require('./src/cloudflared');
 
+async function shutdownWithError(pm, msg, exitCode = 1) {
+  logger.error(msg);
+  try {
+    await pm.stopAll();
+  } catch (_) { /* ignore */ }
+  process.exit(exitCode);
+}
+
 async function main() {
   logger.info('=== Secure VLESS Node v2.0 starting ===');
 
@@ -59,25 +67,36 @@ async function main() {
   pm.attachSignals();
 
   // 8. Start sing-box
-  sb.start(singBoxPath, sbConfigPath, pm);
+  sb.start(singBoxPath, sbConfigPath, pm, cfg);
 
   // Wait a moment for sing-box to bind
   await new Promise((r) => setTimeout(r, 2000));
 
-  // Verify sing-box is running
   if (!pm.isRunning('sing-box')) {
-    logger.error('Sing-box failed to stay running. Check config.');
-    await pm.stopAll();
-    process.exit(1);
+    await shutdownWithError(pm, 'Sing-box failed to stay running.');
   }
   logger.info('Sing-box is running');
 
   // 9. Start cloudflared tunnel
   let tunnelHost = null;
   try {
-    tunnelHost = await cf.startTunnel(cloudflaredPath, cfg.server.port, pm);
+    tunnelHost = await cf.startTunnel(cloudflaredPath, cfg.server.port, pm, (newHost) => {
+      // Tunnel changed after a restart - log the new node link
+      logger.info(`Tunnel re-established: ${newHost}`);
+      const newLink = buildVlessLink({
+        uuid, host: newHost, port: 443,
+        path: cfg.vless.path, tls: true, sni: newHost,
+        showFull: cfg.security.showFullLink
+      });
+      logger.info(`[CF Tunnel] ${newLink}`);
+    });
   } catch (e) {
     logger.error(`Cloudflare Tunnel failed: ${e.message}`);
+    // In tunnel mode (enableDirect=false), tunnel failure means service is unusable.
+    // Must shut down sing-box and exit.
+    if (!cfg.security.enableDirect) {
+      await shutdownWithError(pm, 'Tunnel mode: Cloudflare Tunnel failed and cannot recover. Shutting down.');
+    }
   }
 
   // 10. Output node info (masked)
@@ -106,6 +125,16 @@ async function main() {
     logger.info('SHOW_FULL_LINK=true: full link printed above.');
   } else {
     logger.info('Set SHOW_FULL_LINK=true in env to print full unmasked link.');
+  }
+
+  // 11. Monitor sing-box: if it dies, shut everything down (no zombie proxy)
+  const sbChild = pm.get('sing-box');
+  if (sbChild) {
+    sbChild.on('exit', async (code, signal) => {
+      if (pm.shuttingDown) return;
+      logger.error(`Sing-box exited code=${code} signal=${signal}. Shutting down.`);
+      await shutdownWithError(pm, 'Sing-box died, no zombie process allowed.');
+    });
   }
 
   logger.info('=== Startup complete ===');
